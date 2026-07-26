@@ -197,7 +197,7 @@ async def clear_queue(message: Message):
     for admin_msg_id, info_msg_id in rows:
         for mid in (admin_msg_id, info_msg_id):
             try:
-                await bot.delete_message(ADMIN_ID, mid)
+                await bot.delete_message(chat_id=ADMIN_ID, message_id=mid)
                 deleted += 1
             except Exception:
                 pass
@@ -260,7 +260,7 @@ async def user_submission(message: Message):
         return
 
     info_text = f"👤 От: {display_name(user.username, user.first_name)} (ID: {user.id})"
-    info_msg = await bot.send_message(ADMIN_ID, info_text)
+    info_msg = await bot.send_message(chat_id=ADMIN_ID, text=info_text)
 
     admin_msg = await message.copy_to(chat_id=ADMIN_ID)
 
@@ -295,7 +295,9 @@ async def user_submission(message: Message):
     sub_id = cur.lastrowid
 
     await bot.edit_message_reply_markup(
-        ADMIN_ID, admin_msg.message_id, reply_markup=kb_for_submission(sub_id)
+        chat_id=ADMIN_ID,
+        message_id=admin_msg.message_id,
+        reply_markup=kb_for_submission(sub_id),
     )
 
     await message.answer("✅ Спасибо! Ваше сообщение отправлено на модерацию.")
@@ -334,27 +336,33 @@ async def cb_publish(callback: CallbackQuery):
     try:
         ctype = sub["content_type"]
         if ctype == "text":
-            await bot.send_message(CHANNEL_ID, text)
+            await bot.send_message(chat_id=CHANNEL_ID, text=text)
         elif ctype == "photo":
-            await bot.send_photo(CHANNEL_ID, sub["file_id"], caption=text)
+            await bot.send_photo(chat_id=CHANNEL_ID, photo=sub["file_id"], caption=text)
         elif ctype == "video":
-            await bot.send_video(CHANNEL_ID, sub["file_id"], caption=text)
+            await bot.send_video(chat_id=CHANNEL_ID, video=sub["file_id"], caption=text)
         elif ctype == "animation":
-            await bot.send_animation(CHANNEL_ID, sub["file_id"], caption=text)
+            await bot.send_animation(chat_id=CHANNEL_ID, animation=sub["file_id"], caption=text)
         elif ctype == "document":
-            await bot.send_document(CHANNEL_ID, sub["file_id"], caption=text)
+            await bot.send_document(chat_id=CHANNEL_ID, document=sub["file_id"], caption=text)
         else:
-            await bot.copy_message(CHANNEL_ID, ADMIN_ID, sub["admin_msg_id"])
-            await bot.send_message(CHANNEL_ID, f"— {author}")
+            await bot.copy_message(
+                chat_id=CHANNEL_ID, from_chat_id=ADMIN_ID, message_id=sub["admin_msg_id"]
+            )
+            await bot.send_message(chat_id=CHANNEL_ID, text=f"— {author}")
     except Exception as e:
         await callback.answer(f"Ошибка публикации: {e}", show_alert=True)
         return
 
     await callback.answer("✅ Опубликовано в канал")
     try:
-        await bot.edit_message_reply_markup(ADMIN_ID, sub["admin_msg_id"], reply_markup=None)
+        await bot.edit_message_reply_markup(
+            chat_id=ADMIN_ID, message_id=sub["admin_msg_id"], reply_markup=None
+        )
         await bot.send_message(
-            ADMIN_ID, "☑️ Опубликовано в канал.", reply_to_message_id=sub["admin_msg_id"]
+            chat_id=ADMIN_ID,
+            text="☑️ Опубликовано в канал.",
+            reply_to_message_id=sub["admin_msg_id"],
         )
     except Exception:
         pass
@@ -378,7 +386,7 @@ async def cb_clear(callback: CallbackQuery):
     for admin_msg_id, info_msg_id in rows:
         for mid in (admin_msg_id, info_msg_id):
             try:
-                await bot.delete_message(ADMIN_ID, mid)
+                await bot.delete_message(chat_id=ADMIN_ID, message_id=mid)
                 deleted += 1
             except Exception:
                 pass
