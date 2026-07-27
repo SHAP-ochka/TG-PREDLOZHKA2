@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 
 import aiosqlite
@@ -115,11 +116,40 @@ def kb_for_submission(sub_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🆔", callback_data=f"id:{sub_id}"),
                 InlineKeyboardButton(text="📤", callback_data=f"pub:{sub_id}"),
                 InlineKeyboardButton(text="🗑", callback_data=f"clr:{sub_id}"),
+            ],
+            [
                 InlineKeyboardButton(text="🔇", callback_data=f"mute:{sub_id}"),
+                InlineKeyboardButton(text="🕒", callback_data=f"time:{sub_id}"),
                 InlineKeyboardButton(text="🚫", callback_data=f"ban:{sub_id}"),
-            ]
+            ],
         ]
     )
+
+
+# варианты длительности мута для кнопки 🕒: (подпись, код, timedelta)
+MUTE_DURATIONS = [
+    ("1 час", "1h", timedelta(hours=1)),
+    ("1 день", "1d", timedelta(days=1)),
+    ("1 неделя", "1w", timedelta(weeks=1)),
+    ("1 месяц", "1mo", timedelta(days=30)),
+    ("1 год", "1y", timedelta(days=365)),
+]
+
+
+def kb_time_menu(sub_id: int) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text=label, callback_data=f"settime:{sub_id}:{code}")
+        for label, code, _ in MUTE_DURATIONS
+    ]
+    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"backkb:{sub_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ---------- Антиспам (в памяти, сбрасывается при перезапуске бота) ----------
+SPAM_WINDOW_SECONDS = 30  # окно времени, в течение которого считаем сообщения "подряд"
+SPAM_THRESHOLD = 15  # после скольких сообщений в этом окне срабатывает автомут
+spam_tracker: dict[int, list[float]] = {}
 
 
 def display_name(username: str | None, first_name: str | None) -> str:
@@ -154,11 +184,14 @@ async def cmd_start(message: Message):
             "Бот-предложка запущен.\n\n"
             "На каждое сообщение пользователя будет карточка с кнопками:\n"
             "🆔 — узнать ID и ник отправителя\n"
-            "📤 — опубликовать в канал (с указанием автора)\n"
+            "📤 — опубликовать в канал (с указанием имени автора)\n"
             "🗑 — очистить всю историю сообщений этого пользователя\n"
-            "🔇 — запретить писать боту на 7 дней\n"
+            "🔇 — мут на 7 дней (повторное нажатие — снять мут)\n"
+            "🕒 — выбрать свой срок мута (час/день/неделя/месяц/год)\n"
             "🚫 — заблокировать навсегда (повторное нажатие — разблокировать)\n\n"
-            "Чтобы ответить пользователю — сделайте Reply (ответить) на его сообщение прямо здесь.",
+            "Чтобы ответить пользователю — сделайте Reply (ответить) на его сообщение прямо здесь.\n\n"
+            "⚠️ Если кто-то отправит подряд много сообщений (от 15) — бот сам замьютит его "
+            "на 7 дней и пришлёт вам уведомление.",
             reply_markup=ADMIN_KEYBOARD,
         )
     else:
@@ -259,6 +292,32 @@ async def user_submission(message: Message):
             )
         return
 
+    now_ts = time.time()
+    timestamps = spam_tracker.setdefault(user.id, [])
+    timestamps.append(now_ts)
+    timestamps[:] = [t for t in timestamps if now_ts - t <= SPAM_WINDOW_SECONDS]
+
+    if len(timestamps) >= SPAM_THRESHOLD:
+        spam_tracker.pop(user.id, None)
+        until = datetime.utcnow() + timedelta(days=7)
+        await db.execute(
+            "UPDATE users SET banned_until=? WHERE user_id=?", (until.isoformat(), user.id)
+        )
+        await db.commit()
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                "🚨 Автоматический мут за спам\n"
+                f"{display_name(user.username, user.first_name)} (ID: {user.id})\n"
+                f"Отправил {SPAM_THRESHOLD}+ сообщений подряд и замьючен на 7 дней "
+                f"(до {until.strftime('%d.%m.%Y %H:%M')} UTC)."
+            ),
+        )
+        await message.answer(
+            "🔇 Вы отправили слишком много сообщений подряд и временно ограничены."
+        )
+        return
+
     info_text = f"👤 От: {display_name(user.username, user.first_name)} (ID: {user.id})"
     info_msg = await bot.send_message(chat_id=ADMIN_ID, text=info_text)
 
@@ -327,10 +386,9 @@ async def cb_publish(callback: CallbackQuery):
         return
 
     urow = await get_user(sub["user_id"])
-    username = urow[1] if urow else None
     first_name = urow[2] if urow else None
-    author = display_name(username, first_name)
-    attribution = f"\n\n— {author}"
+    author_line = f"👤 {first_name or 'Аноним'}"
+    attribution = f"\n\n{author_line}"
     text = (sub["text_content"] or "") + attribution
 
     try:
@@ -349,7 +407,7 @@ async def cb_publish(callback: CallbackQuery):
             await bot.copy_message(
                 chat_id=CHANNEL_ID, from_chat_id=ADMIN_ID, message_id=sub["admin_msg_id"]
             )
-            await bot.send_message(chat_id=CHANNEL_ID, text=f"— {author}")
+            await bot.send_message(chat_id=CHANNEL_ID, text=author_line)
     except Exception as e:
         await callback.answer(f"Ошибка публикации: {e}", show_alert=True)
         return
@@ -396,7 +454,7 @@ async def cb_clear(callback: CallbackQuery):
     await callback.answer(f"🗑 Удалено сообщений: {deleted}", show_alert=True)
 
 
-# ---------- Callback: мут на 7 дней ----------
+# ---------- Callback: мут на 7 дней (toggle) ----------
 @router.callback_query(F.data.startswith("mute:"))
 async def cb_mute(callback: CallbackQuery):
     sub_id = int(callback.data.split(":")[1])
@@ -405,15 +463,86 @@ async def cb_mute(callback: CallbackQuery):
         await callback.answer("Не найдено", show_alert=True)
         return
 
-    until = datetime.utcnow() + timedelta(days=7)
+    urow = await get_user(sub["user_id"])
+    currently_muted = False
+    if urow and urow[3]:
+        until_dt = datetime.fromisoformat(urow[3])
+        if until_dt > datetime.utcnow():
+            currently_muted = True
+
+    if currently_muted:
+        await db.execute(
+            "UPDATE users SET banned_until=NULL WHERE user_id=?", (sub["user_id"],)
+        )
+        await db.commit()
+        await callback.answer("🔊 Пользователь размьючен", show_alert=True)
+    else:
+        until = datetime.utcnow() + timedelta(days=7)
+        await db.execute(
+            "UPDATE users SET banned_until=? WHERE user_id=?", (until.isoformat(), sub["user_id"])
+        )
+        await db.commit()
+        await callback.answer(
+            f"🔇 Пользователь не сможет писать 7 дней (до {until.strftime('%d.%m %H:%M')} UTC)",
+            show_alert=True,
+        )
+
+
+# ---------- Callback: открыть меню выбора срока мута ----------
+@router.callback_query(F.data.startswith("time:"))
+async def cb_time_menu(callback: CallbackQuery):
+    sub_id = int(callback.data.split(":")[1])
+    sub = await get_submission(sub_id)
+    if not sub:
+        await callback.answer("Не найдено", show_alert=True)
+        return
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb_time_menu(sub_id))
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    await callback.answer()
+
+
+# ---------- Callback: установить выбранный срок мута ----------
+@router.callback_query(F.data.startswith("settime:"))
+async def cb_set_time(callback: CallbackQuery):
+    _, sub_id_str, code = callback.data.split(":")
+    sub_id = int(sub_id_str)
+    sub = await get_submission(sub_id)
+    if not sub:
+        await callback.answer("Не найдено", show_alert=True)
+        return
+
+    duration = next((d for _, c, d in MUTE_DURATIONS if c == code), None)
+    if duration is None:
+        await callback.answer("Неизвестный интервал", show_alert=True)
+        return
+
+    until = datetime.utcnow() + duration
     await db.execute(
         "UPDATE users SET banned_until=? WHERE user_id=?", (until.isoformat(), sub["user_id"])
     )
     await db.commit()
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb_for_submission(sub_id))
+    except Exception:
+        pass
     await callback.answer(
-        f"🔇 Пользователь не сможет писать 7 дней (до {until.strftime('%d.%m %H:%M')} UTC)",
-        show_alert=True,
+        f"🔇 Замьючен до {until.strftime('%d.%m.%Y %H:%M')} UTC", show_alert=True
     )
+
+
+# ---------- Callback: вернуться к основной клавиатуре ----------
+@router.callback_query(F.data.startswith("backkb:"))
+async def cb_back(callback: CallbackQuery):
+    sub_id = int(callback.data.split(":")[1])
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb_for_submission(sub_id))
+    except Exception:
+        pass
+    await callback.answer()
 
 
 # ---------- Callback: бан навсегда (toggle) ----------
